@@ -105,17 +105,16 @@ class Datalayer:
     def rebuild(self, cfg=None):
         from superduperdb.base import build
 
-        self.databackend = build.build_databackend(cfg.data_backend if cfg else None)
-        self.compute = build.build_compute(cfg.cluster.compute if cfg else None)
+        cfg = cfg or s.CFG
 
-        if cfg:
-            self.metadata = build.build_metadata(cfg.metadata_store)
-            self.artifact_store = build.build_artifact_store(cfg.artifact_store)
-            self.artifact_store.serializers = self.serializers
-        else:
-            self.metadata = self.databackend.build_metadata()
-            self.artifact_store = self.databackend.build_artifact_store()
-            self.artifact_store.serializers = self.serializers
+        self.databackend = build.build_databackend(cfg)
+        self.compute = build.build_compute(cfg.cluster.compute)
+
+        self.metadata = build.build_metadata(cfg, self.databackend)
+        self.artifact_store = build.build_artifact_store(
+            cfg.artifact_store, self.databackend
+        )
+        self.artifact_store.serializers = self.serializers
 
     @property
     def server_mode(self):
@@ -140,11 +139,7 @@ class Datalayer:
             assert s.CFG.cluster.vector_search_type == 'lance', msg
 
         vector_search_cls = vector_searcher_implementations[searcher_type]
-        vector_comparison = vector_search_cls(
-            identifier=vi.identifier,
-            dimensions=vi.dimensions,
-            measure=vi.measure,
-        )
+        vector_comparison = vector_search_cls.from_component(vi)
 
         assert isinstance(clt.identifier, str), 'clt.identifier must be a string'
 
@@ -174,7 +169,7 @@ class Datalayer:
 
         progress = tqdm.tqdm(desc='Loading vectors into vector-table...')
         for record_batch in ibatch(
-            self.execute(query),
+            self.execute(query, load_hybrid=False),
             s.CFG.cluster.backfill_batch_size,
         ):
             items = []
@@ -192,6 +187,7 @@ class Datalayer:
                 )
                 if isinstance(h, Encodable):
                     h = h.x
+
                 items.append(VectorItem.create(id=str(id), vector=h))
 
             searcher.add(items)
@@ -442,7 +438,7 @@ class Datalayer:
         if refresh and self.cdc.running:
             raise Exception('cdc cannot be activated and refresh=True')
 
-        if s.CFG.cluster.cdc is not None:
+        if s.CFG.cluster.cdc.uri is not None:
             logging.info('CDC active, skipping refresh')
             return inserted_ids, None
 
@@ -452,7 +448,7 @@ class Datalayer:
             )
         return inserted_ids, None
 
-    def select(self, select: Select) -> SelectResult:
+    def select(self, select: Select, load_hybrid: bool = True) -> SelectResult:
         """
         Select data.
 
@@ -460,7 +456,7 @@ class Datalayer:
         """
         if select.variables:
             select = select.set_variables(self)  # type: ignore[assignment]
-        return select.execute(self)
+        return select.execute(self, load_hybrid=load_hybrid)
 
     def refresh_after_delete(
         self,
@@ -912,6 +908,7 @@ class Datalayer:
         if parent is not None:
             self.metadata.create_parent_child(parent, object.unique_id)
         object.post_create(self)
+        self._add_component_to_cache(object)
         these_jobs = object.schedule_jobs(self, dependencies=dependencies)
         jobs.extend(these_jobs)
         return jobs
@@ -1261,6 +1258,16 @@ class Datalayer:
 
         # TODO: gracefully close all opened connections
         return
+
+    def _add_component_to_cache(self, component: Component):
+        """
+        Add component to cache when it is added to the db.
+        Avoiding the need to load it from the db again.
+        """
+        type_id = component.type_id
+        if cm := self.type_id_to_cache_mapping.get(type_id):
+            getattr(self, cm)[component.identifier] = component
+        component.on_load(self)
 
 
 @dc.dataclass

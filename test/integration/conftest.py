@@ -1,3 +1,4 @@
+import os
 import random
 from pathlib import Path
 
@@ -39,8 +40,7 @@ torch and torch.manual_seed(42)
 np.random.seed(42)
 
 
-@pytest.fixture
-def database_with_default_encoders_and_model(test_db):
+def add_models_encoders(test_db):
     test_db.add(tensor(torch.float, shape=(32,)))
     test_db.add(tensor(torch.float, shape=(16,)))
     test_db.add(
@@ -70,7 +70,12 @@ def database_with_default_encoders_and_model(test_db):
         compatible_listener='model_linear_a/z',
     )
     test_db.add(vi)
-    yield test_db
+    return test_db
+
+
+@pytest.fixture
+def database_with_default_encoders_and_model(test_db):
+    yield add_models_encoders(test_db)
 
 
 @pytest.mark.skipif(not torch, reason='Torch not installed')
@@ -111,11 +116,14 @@ def dask_client(monkeypatch, request):
     db_name = "test_db"
     data_backend = f'mongodb://superduper:superduper@localhost:27017/{db_name}'
 
+    data_backend = os.environ.get('SUPERDUPER_MONGO_URI', data_backend)
+    address = os.environ.get('SUPERDUPER_DASK_URI', 'tcp://localhost:8786')
+
     monkeypatch.setenv('SUPERDUPERDB_DATA_BACKEND', data_backend)
 
     # Change the default value
     client = DaskComputeBackend(
-        address='tcp://localhost:8786',
+        address=address,
         local=False,
     )
 
@@ -130,9 +138,10 @@ def ray_client():
     from superduperdb.backends.ray.compute import RayComputeBackend
 
     working_dir = Path(__file__).parents[1]
+    address = os.environ.get('SUPERDUPER_RAY_URI', 'ray://127.0.0.1:10001')
 
     client = RayComputeBackend(
-        address='ray://127.0.0.1:10001',
+        address=address,
         runtime_env={"working_dir": working_dir, 'excludes': ['unittest']},
     )
 

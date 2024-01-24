@@ -23,6 +23,7 @@ from superduperdb.backends.base.query import (
 from superduperdb.base.cursor import SuperDuperCursor
 from superduperdb.base.document import Document
 from superduperdb.base.serializable import Variable
+from superduperdb.misc.files import load_uris
 
 
 class FindOne(QueryComponent):
@@ -52,8 +53,8 @@ class FindOne(QueryComponent):
 
         :param fold: The fold to add
         """
-        if not self.args:
-            args: t.List[t.Any] = [{}]
+
+        args = self.args or [{}]
         args[0]['_fold'] = fold
         return FindOne(
             name=self.name,
@@ -164,10 +165,15 @@ class Find(QueryComponent):
                         {f'_outputs.{key}.{model}.{version}': {'$exists': 0}},
                     ]
                 },
-                *self.args[1],
+                *self.args[1:],
             ]
         else:
             args = [{f'_outputs.{key}.{model}': {'$exists': 0}}]
+
+        if len(args) == 1:
+            args.append({})
+
+        args[1] = {'_id': 1}
 
         return Find(
             name='find',
@@ -246,14 +252,19 @@ class Aggregate(Select):
     def _replace_document_with_vector(step, vector_index, db):
         step = copy.deepcopy(step)
         assert "like" in step['$vectorSearch']
-        vector_index = db.vector_indices[vector_index]
-        models, keys = vector_index.models_keys
-        step['$vectorSearch']['queryVector'], _, _ = vector_index.get_vector(
-            like=step['$vectorSearch']['like'],
-            models=models,
-            keys=keys,
-            db=db,
-        )
+        vector = step['$vectorSearch']['like']
+
+        if not isinstance(vector, Document):
+            vector_index = db.vector_indices[vector_index]
+            models, keys = vector_index.models_keys
+            vector, _, _ = vector_index.get_vector(
+                like=vector,
+                models=models,
+                keys=keys,
+                db=db,
+            )
+
+        step['$vectorSearch']['queryVector'] = vector
         indexing_key = vector_index.indexing_listener.key
         if indexing_key.startswith('_outputs'):
             indexing_key = indexing_key.split('.')[1]
@@ -282,7 +293,7 @@ class Aggregate(Select):
         )
         return pipeline
 
-    def execute(self, db):
+    def execute(self, db, load_hybrid=True):
         collection = db.databackend.get_table_or_collection(
             self.table_or_collection.identifier
         )
@@ -297,6 +308,7 @@ class Aggregate(Select):
             raw_cursor=cursor,
             id_field='_id',
             encoders=db.encoders,
+            load_hybrid=load_hybrid,
         )
 
 
@@ -355,7 +367,7 @@ class MongoCompoundSelect(CompoundSelect):
         post_query_linker = self.query_linker.select_using_ids(similar_ids)
         return post_query_linker.execute(db), similar_scores
 
-    def execute(self, db):
+    def execute(self, db, load_hybrid=True):
         output, scores = self._execute(db)
         if isinstance(output, (pymongo.cursor.Cursor, mongomock.collection.Cursor)):
             return SuperDuperCursor(
@@ -363,8 +375,11 @@ class MongoCompoundSelect(CompoundSelect):
                 id_field='_id',
                 scores=scores,
                 encoders=db.encoders,
+                load_hybrid=load_hybrid,
             )
         elif isinstance(output, dict):
+            if load_hybrid and CFG.hybrid_storage:
+                load_uris(output, encoders=db.encoders)
             return Document(Document.decode(output, encoders=db.encoders))
         return output
 
@@ -688,42 +703,6 @@ class Collection(TableOrCollection):
 
     def insert_one(self, document, *args, **kwargs):
         return self._insert([document], *args, **kwargs)
-
-    def like(self, r: Document, vector_index: str, n: int = 10):
-        if not CFG.self_hosted_vector_search:
-            return super().like(r=r, n=n, vector_index=vector_index)
-        else:
-
-            class LocalAggregate:
-                def find(this, *args, **kwargs):
-                    second_part = []
-                    if args:
-                        second_part.append({"$match": args[0] if args else {}})
-                    if args[1:]:
-                        project_args = args[1].copy()
-                        project_args.update({"score": {"$meta": "vectorSearchScore"}})
-                        second_part.append({"$project": project_args})
-                    else:
-                        second_part.append(
-                            {'$addFields': {'score': {'$meta': 'vectorSearchScore'}}}
-                        )
-                    pl = [
-                        {
-                            "$vectorSearch": {
-                                'like': r,
-                                "limit": n,
-                                'numCandidates': n,
-                            }
-                        },
-                        *second_part,
-                    ]
-                    return Aggregate(
-                        table_or_collection=self,
-                        args=[pl],
-                        vector_index=vector_index,
-                    )
-
-            return LocalAggregate()
 
     def model_update(
         self,

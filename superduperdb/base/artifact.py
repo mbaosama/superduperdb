@@ -25,14 +25,6 @@ class Artifact:
     :param hash: in case the object isn't hashable (deduplication not possible)
     """
 
-    # TODO Why do we need all this?? The annotations are clear below
-    file_id: t.Optional[str] = None
-    object_id: int = 0
-    save_method: t.Optional[str] = None
-    serializer: str = 'dill'
-    hash: t.Optional[int] = None
-    uri: t.Optional[str] = None
-
     def __init__(
         self,
         artifact: t.Any = None,
@@ -111,8 +103,8 @@ class Artifact:
         """Serialize this artifact into bytes"""
 
         if self._is_self_serializable(self.artifact):
-            assert hasattr(object, 'serialize')
-            return t.cast(bytes, object.serialize())
+            assert hasattr(self.artifact, 'serialize')
+            return t.cast(bytes, self.artifact.serialize())
 
         serializer = serializers[self.serializer]
         try:
