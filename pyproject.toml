@@ -106,7 +106,7 @@ testing = [
     "nbval>=0.10.0",
     "vcrpy",
     "pytest-asyncio",
-    "urllib3<2",  # see https://github.com/urllib3/urllib3/issues/3053
+    "urllib3<3",  # see https://github.com/urllib3/urllib3/issues/3053
 ]
 # Dependencies for server
 server = [
